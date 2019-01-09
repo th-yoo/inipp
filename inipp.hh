@@ -32,9 +32,10 @@
 #define INIPP_VERSION "1.0"
 
 #include <string>
-#include <map>
+#include <unordered_map>
 #include <fstream>
 #include <stdexcept>
+#include <sstream>
 
 namespace inipp
 {
@@ -91,7 +92,9 @@ namespace inipp
   class inifile
   {
     public:
-      inline inifile(std::ifstream& infile);
+      explicit inline inifile(std::ifstream& infile);
+      explicit inline inifile(std::ifstream&& infile);
+
       inline std::string get(const std::string& section,
                              const std::string& key) const;
       inline std::string get(const std::string& key) const;
@@ -103,29 +106,88 @@ namespace inipp
                               const std::string& default_value) const;
       inline inisection section(const std::string& section) const;
 
+      // borrow from mcmtroffaes/inipp
+      // non-pointer built-in type
+      // TODO: type check
+      template<typename T>
+      T getval( const std::string& sec
+	      , const std::string& key
+	      , const T def) const
+      {
+	  std::string src;
+	  try {
+		  src = get(sec, key);
+	  } catch (...) {
+		  return def;
+	  }
+
+	  std::istringstream i{src};
+	  char c;
+	  T rv;
+	  if ((i>>std::boolalpha>>rv) && !(i>>c))
+		  return rv;
+	  return def;
+      }
+
+      const std::string getval( const std::string& sec
+			      , const std::string& key
+			      , const char* def) const
+      try {
+	      return dget(sec, key, def);
+      } catch (...) { return def; }
+
+      const std::string getval( const std::string& sec
+			      , const std::string& key
+			      , const std::string& def) const
+      try {
+	      return dget(sec, key, def);
+      } catch (...) { return def; }
+
+      // TODO: copy, move
+
+      // https://www.reddit.com/r/programming/comments/7f0ljb/check_out_my_new_c_library_to_parse_creating_ini/
+      // TODO: overload operator []
+
     protected:
-      std::map<std::string,std::map<std::string,std::string> > _sections;
-      std::map<std::string,std::string> _defaultsection;
+      typedef std::unordered_map<std::string, std::string> kv_t;
+      typedef std::unordered_map<std::string, kv_t> kkv_t;
+      kkv_t sections_;
+      kv_t defaultsection_;
   };
 
-  namespace _private
+  namespace private_
   {
-    inline std::string trim(const std::string& str,
+    inline std::string& rstrip(std::string& s, const std::string& c_to_strip);
+    inline std::string& lstrip(std::string& s, const std::string& c_to_strip);
+
+    inline std::string& trim(std::string&& str,
                             const std::string& whitespace = " \t\n\r\f\v");
+    inline std::string& trim(std::string& str,
+                            const std::string& whitespace = " \t\n\r\f\v");
+
+
     inline bool split(const std::string& in, const std::string& sep,
                       std::string& first, std::string& second);
+
+    inline std::string& strip_comment(std::string& s, const std::string& mark);
+    inline std::string& strip_comment(std::string& s);
   }
 
+  inifile::inifile(std::ifstream&& infile)
+	  : inifile(infile) {}
+
   inifile::inifile(std::ifstream& infile) {
-    std::map<std::string,std::string>* cursec = &this->_defaultsection;
+    kv_t* cursec = &this->defaultsection_;
     std::string line;
 
     while(std::getline(infile, line)) {
       // trim line
-      line = _private::trim(line);
+      line = private_::trim(line);
+      // remove comments
+      private_::strip_comment(line);
 
-      // ignore empty lines and comments
-      if(line.empty() || line[0] == '#') {
+      // ignore empty lines
+      if(line.empty()) {
         continue;
       }
 
@@ -136,8 +198,8 @@ namespace inipp
                              "' is missing a closing bracket.");
         }
 
-        line = _private::trim(line.substr(1, line.size() - 2));
-        cursec = &this->_sections[line];
+        line = private_::trim(line.substr(1, line.size() - 2));
+        cursec = &this->sections_[line];
         continue;
       }
 
@@ -145,8 +207,8 @@ namespace inipp
       std::string key;
       std::string value;
 
-      if(_private::split(line, "=", key, value)) {
-        (*cursec)[_private::trim(key)] = _private::trim(value);
+      if(private_::split(line, "=", key, value)) {
+        (*cursec)[private_::trim(key)] = private_::trim(value);
         continue;
       }
 
@@ -157,23 +219,23 @@ namespace inipp
 
   std::string inifile::get(const std::string& section,
                            const std::string& key) const {
-    if(!this->_sections.count(section)) {
+    if(!this->sections_.count(section)) {
       throw unknown_section_error(section);
     }
 
-    if(!this->_sections.find(section)->second.count(key)) {
+    if(!this->sections_.find(section)->second.count(key)) {
       throw unknown_entry_error(section, key);
     }
 
-    return this->_sections.find(section)->second.find(key)->second;
+    return this->sections_.find(section)->second.find(key)->second;
   }
 
   std::string inifile::get(const std::string& key) const {
-    if(!this->_defaultsection.count(key)) {
+    if(!this->defaultsection_.count(key)) {
       throw unknown_entry_error(key);
     }
 
-    return this->_defaultsection.find(key)->second;
+    return this->defaultsection_.find(key)->second;
   };
 
   std::string inifile::dget(const std::string& section,
@@ -199,7 +261,7 @@ namespace inipp
   }
 
   inisection inifile::section(const std::string& section) const {
-    if(!this->_sections.count(section)) {
+    if(!this->sections_.count(section)) {
       throw unknown_section_error(section);
     }
 
@@ -225,21 +287,35 @@ namespace inipp
     return this->_ini.dget(this->_section, key, default_val);
   }
 
-  inline std::string _private::trim(const std::string& str,
-                                    const std::string& whitespace) {
-    size_t startpos = str.find_first_not_of(whitespace);
-    size_t endpos = str.find_last_not_of(whitespace);
-
-    // only whitespace, return empty line
-    if(startpos == std::string::npos || endpos == std::string::npos) {
-      return std::string();
-    }
-
-    // trim leading and trailing whitespace
-    return str.substr(startpos, endpos - startpos + 1);
+  inline std::string& private_::rstrip( std::string& s
+		  		      , const std::string& c_to_strip)
+  {
+    size_t endpos = s.find_last_not_of(c_to_strip);
+    if (endpos == std::string::npos) return s.erase();
+    return s.erase(endpos+1);
   }
 
-  inline bool _private::split(const std::string& in, const std::string& sep,
+  inline std::string& private_::lstrip( std::string& s
+		  		      , const std::string& c_to_strip)
+  {
+    size_t startpos = s.find_first_not_of(c_to_strip);
+    if (startpos == std::string::npos) return s.erase();
+    return s.erase(0, startpos);
+  }
+
+  inline std::string& private_::trim(std::string&& str,
+                                    const std::string& whitespace) {
+	  return rstrip(lstrip(str, whitespace), whitespace);
+  }
+
+  inline std::string& private_::trim(std::string& str,
+                                    const std::string& whitespace) {
+	  return rstrip(lstrip(str, whitespace), whitespace);
+  }
+
+
+
+  inline bool private_::split(const std::string& in, const std::string& sep,
                               std::string& first, std::string& second) {
     size_t eqpos = in.find(sep);
 
@@ -251,6 +327,18 @@ namespace inipp
     second = in.substr(eqpos + sep.size(), in.size() - eqpos - sep.size());
 
     return true;
+  }
+
+  inline std::string& private_::strip_comment(std::string& s, const std::string& mark)
+  {
+	  size_t pos = s.find_first_of(mark);
+	  if (pos != std::string::npos) s.erase(pos);
+	  return s;
+  }
+
+  inline std::string& private_::strip_comment(std::string& s)
+  {
+	  return strip_comment(strip_comment(s, "#"), ";");
   }
 }
 
