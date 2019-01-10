@@ -82,6 +82,38 @@ namespace inipp
       inline std::string dget(const std::string& key,
                               const std::string& default_value) const;
 
+      template<typename T>
+      T getval( const std::string& key
+	      , const T def) const
+      {
+	  std::string src;
+	  try {
+		  src = get(key);
+	  } catch (...) {
+		  return def;
+	  }
+
+	  std::istringstream i{src};
+	  char c;
+	  T rv;
+	  if ((i>>std::boolalpha>>rv) && !(i>>c))
+		  return rv;
+	  return def;
+      }
+
+      const std::string getval( const std::string& key
+			      , const char* def) const
+      try {
+	      return dget(key, def);
+      } catch (...) { return def; }
+
+      const std::string getval( const std::string& key
+			      , const std::string& def) const
+      try {
+	      return dget(key, def);
+      } catch (...) { return def; }
+
+
     protected:
       inline inisection(const std::string& section, const inifile& ini);
 
